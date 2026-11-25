@@ -51,6 +51,16 @@ export async function onRequest(context) {
         settings.access = newSettings.access || settings.access
         settings.access.userSessionMaxAge = normalizeSessionMaxAgeDays(settings.access.userSessionMaxAge)
         settings.access.adminSessionMaxAge = normalizeSessionMaxAgeDays(settings.access.adminSessionMaxAge)
+        settings.access.imageTransformEnabled = settings.access.imageTransformEnabled === true
+
+        const allowedSizes = normalizeImageTransformAllowedSizes(settings.access.imageTransformAllowedSizes)
+        if (allowedSizes.error) {
+            return new Response(JSON.stringify({ error: allowedSizes.error }), {
+                status: 400,
+                headers: { 'content-type': 'application/json' },
+            })
+        }
+        settings.access.imageTransformAllowedSizes = allowedSizes.value
 
         // 处理认证设置：空密码表示不修改，_clear 标记表示清除密码
         let userPasswordChanged = false;
@@ -154,6 +164,15 @@ export async function getSecurityConfig(db, env) {
             channel: kvUpload.moderate?.channel || 'moderatecontent.com', // [moderatecontent.com, nsfwjs]
             moderateContentApiKey: kvUpload.moderate?.moderateContentApiKey || kvUpload.moderate?.apiKey || env.ModerateContentApiKey || '',
             nsfwApiPath: kvUpload.moderate?.nsfwApiPath || '',
+        },
+        ipQuery: {
+            enabled: kvUpload.ipQuery?.enabled ?? false,
+            channel: kvUpload.ipQuery?.channel || 'customApi',
+            customApi: {
+                url: kvUpload.ipQuery?.customApi?.url || '',
+                params: normalizeIpQueryParams(kvUpload.ipQuery?.customApi?.params),
+                responseFields: normalizeIpQueryResponseFields(kvUpload.ipQuery?.customApi?.responseFields)
+            }
         }
     }
     settings.upload = upload
@@ -163,6 +182,8 @@ export async function getSecurityConfig(db, env) {
     const access = {
         allowedDomains: kvAccess.allowedDomains || env.ALLOWED_DOMAINS || '',
         whiteListMode: kvAccess.whiteListMode ?? env.WhiteList_Mode === 'true',
+        imageTransformEnabled: kvAccess.imageTransformEnabled === true,
+        imageTransformAllowedSizes: normalizeImageTransformAllowedSizes(kvAccess.imageTransformAllowedSizes).value,
         // 新增会话安全策略字段
         sessionSecure: kvAccess.sessionSecure ?? false,
         userSessionMaxAge: normalizeSessionMaxAgeDays(kvAccess.userSessionMaxAge ?? 14),
@@ -178,4 +199,55 @@ export async function getSecurityConfig(db, env) {
     settings.apiTokens = apiTokens
 
     return settings;
+}
+
+function normalizeImageTransformAllowedSizes(value) {
+    if (value === undefined || value === null || String(value).trim() === '') {
+        return { value: '' }
+    }
+
+    const sizes = String(value)
+        .split(',')
+        .map(size => size.trim().toLowerCase())
+        .filter(Boolean)
+    const normalized = []
+
+    for (const size of sizes) {
+        const match = size.match(/^(auto|[1-9]\d*)x(auto|[1-9]\d*)$/)
+        if (!match || (match[1] === 'auto' && match[2] === 'auto')) {
+            return { error: `Invalid image transform size: ${size}` }
+        }
+
+        for (const dimension of match.slice(1)) {
+            if (dimension !== 'auto' && Number(dimension) > 4096) {
+                return { error: `Invalid image transform size: ${size}` }
+            }
+        }
+
+        if (!normalized.includes(size)) normalized.push(size)
+    }
+
+    return { value: normalized.join(',') }
+}
+
+function normalizeIpQueryParams(params) {
+    if (!Array.isArray(params) || params.length === 0) {
+        return [{ key: 'ip', value: '{ip}' }];
+    }
+
+    return params.map(param => ({
+        key: param?.key || '',
+        value: param?.value || ''
+    }));
+}
+
+function normalizeIpQueryResponseFields(fields) {
+    if (!Array.isArray(fields)) {
+        return [];
+    }
+
+    return fields.map(field => {
+        if (typeof field === 'string') return field;
+        return field?.path || '';
+    });
 }

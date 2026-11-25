@@ -20,6 +20,8 @@ import * as apiManageBatchIndexChunk from '../../functions/api/manage/batch/inde
 import * as apiManageBatchIndexConfig from '../../functions/api/manage/batch/index/config.js';
 import * as apiManageBatchIndexFinalize from '../../functions/api/manage/batch/index/finalize.js';
 import * as apiManageBatchRestoreChunk from '../../functions/api/manage/batch/restore/chunk.js';
+import * as apiManageAiTags from '../../functions/api/manage/ai/tags.js';
+import * as apiManageAiTest from '../../functions/api/manage/ai/test.js';
 import * as apiManageBatchList from '../../functions/api/manage/batch/list.js';
 import * as apiManageBatchSettings from '../../functions/api/manage/batch/settings.js';
 import * as apiManageCusConfigBlockip from '../../functions/api/manage/cusConfig/blockip.js';
@@ -27,10 +29,13 @@ import * as apiManageCusConfigBlockipList from '../../functions/api/manage/cusCo
 import * as apiManageCusConfigFiles from '../../functions/api/manage/cusConfig/files.js';
 import * as apiManageCusConfigList from '../../functions/api/manage/cusConfig/list.js';
 import * as apiManageCusConfigWhiteip from '../../functions/api/manage/cusConfig/whiteip.js';
+import * as apiManageDeleteBatch from '../../functions/api/manage/delete/batch.js';
+import * as apiManageSysConfigAi from '../../functions/api/manage/sysConfig/ai.js';
 import * as apiManageSysConfigOthers from '../../functions/api/manage/sysConfig/others.js';
 import * as apiManageSysConfigPage from '../../functions/api/manage/sysConfig/page.js';
 import * as apiManageSysConfigSecurity from '../../functions/api/manage/sysConfig/security.js';
 import * as apiManageSysConfigUpload from '../../functions/api/manage/sysConfig/upload.js';
+import * as apiManageTagsApply from '../../functions/api/manage/tags/apply.js';
 import * as apiManageTagsAutocomplete from '../../functions/api/manage/tags/autocomplete.js';
 import * as apiManageTagsBatch from '../../functions/api/manage/tags/batch.js';
 import * as apiAuthAdminLogin from '../../functions/api/auth/adminLogin.js';
@@ -70,6 +75,8 @@ const routes = [
     { path: '/api/manage/batch/index/config', module: apiManageBatchIndexConfig, middlewares: [mw_api, mw_api_manage] },
     { path: '/api/manage/batch/index/finalize', module: apiManageBatchIndexFinalize, middlewares: [mw_api, mw_api_manage] },
     { path: '/api/manage/batch/restore/chunk', module: apiManageBatchRestoreChunk, middlewares: [mw_api, mw_api_manage] },
+    { path: '/api/manage/ai/tags', module: apiManageAiTags, middlewares: [mw_api, mw_api_manage] },
+    { path: '/api/manage/ai/test', module: apiManageAiTest, middlewares: [mw_api, mw_api_manage] },
     { path: '/api/manage/batch/list', module: apiManageBatchList, middlewares: [mw_api, mw_api_manage] },
     { path: '/api/manage/batch/settings', module: apiManageBatchSettings, middlewares: [mw_api, mw_api_manage] },
     { path: '/api/manage/cusConfig/blockip', module: apiManageCusConfigBlockip, middlewares: [mw_api, mw_api_manage] },
@@ -77,10 +84,13 @@ const routes = [
     { path: '/api/manage/cusConfig/files', module: apiManageCusConfigFiles, middlewares: [mw_api, mw_api_manage] },
     { path: '/api/manage/cusConfig/list', module: apiManageCusConfigList, middlewares: [mw_api, mw_api_manage] },
     { path: '/api/manage/cusConfig/whiteip', module: apiManageCusConfigWhiteip, middlewares: [mw_api, mw_api_manage] },
+    { path: '/api/manage/delete/batch', module: apiManageDeleteBatch, middlewares: [mw_api, mw_api_manage] },
+    { path: '/api/manage/sysConfig/ai', module: apiManageSysConfigAi, middlewares: [mw_api, mw_api_manage] },
     { path: '/api/manage/sysConfig/others', module: apiManageSysConfigOthers, middlewares: [mw_api, mw_api_manage] },
     { path: '/api/manage/sysConfig/page', module: apiManageSysConfigPage, middlewares: [mw_api, mw_api_manage] },
     { path: '/api/manage/sysConfig/security', module: apiManageSysConfigSecurity, middlewares: [mw_api, mw_api_manage] },
     { path: '/api/manage/sysConfig/upload', module: apiManageSysConfigUpload, middlewares: [mw_api, mw_api_manage] },
+    { path: '/api/manage/tags/apply', module: apiManageTagsApply, middlewares: [mw_api, mw_api_manage] },
     { path: '/api/manage/tags/autocomplete', module: apiManageTagsAutocomplete, middlewares: [mw_api, mw_api_manage] },
     { path: '/api/manage/tags/batch', module: apiManageTagsBatch, middlewares: [mw_api, mw_api_manage] },
     { path: '/api/auth/adminLogin', module: apiAuthAdminLogin, middlewares: [mw_api] },
@@ -176,6 +186,112 @@ async function executeChain(middlewares, handler, context) {
 }
 
 
+// ==================== Worker Cache ====================
+
+// 统一缓存键，HEAD 与 GET 共用完整 GET 响应缓存
+function createCacheKeyRequest(request) {
+    return new Request(request.url, {
+        method: 'GET',
+        headers: request.headers,
+    });
+}
+
+// 解析 Cache-Control 指令，支持 max-age/s-maxage 等数值字段
+function parseCacheDirective(cacheControl, directive) {
+    if (!cacheControl) return null;
+
+    const directives = cacheControl.split(',');
+    for (const rawDirective of directives) {
+        const part = rawDirective.trim();
+        const eqIndex = part.indexOf('=');
+        const name = (eqIndex === -1 ? part : part.slice(0, eqIndex)).trim().toLowerCase();
+
+        if (name !== directive) continue;
+        if (eqIndex === -1) return true;
+
+        const value = part.slice(eqIndex + 1).trim().replace(/^"|"$/g, '');
+        const seconds = Number.parseInt(value, 10);
+        return Number.isFinite(seconds) ? seconds : null;
+    }
+
+    return null;
+}
+
+function responseHasCacheDirective(cacheControl, directive) {
+    return parseCacheDirective(cacheControl, directive) !== null;
+}
+
+function getResponseCacheTtl(response) {
+    const cacheControl = response.headers.get('Cache-Control') || '';
+    const sMaxAge = parseCacheDirective(cacheControl, 's-maxage');
+    if (typeof sMaxAge === 'number') return sMaxAge;
+
+    const maxAge = parseCacheDirective(cacheControl, 'max-age');
+    if (typeof maxAge === 'number') return maxAge;
+
+    return null;
+}
+
+function isCacheLookupRequest(request) {
+    return request.method === 'GET' || request.method === 'HEAD';
+}
+
+// 只写入完整 GET 响应，Range 请求仅尝试命中已有完整缓存
+function isCacheStoreRequest(request) {
+    return request.method === 'GET' && !request.headers.has('Range');
+}
+
+function isCacheableResponse(request, response) {
+    if (!isCacheStoreRequest(request)) return false;
+    if (response.status !== 200) return false;
+    if (response.headers.has('Set-Cookie')) return false;
+
+    const cacheControl = response.headers.get('Cache-Control') || '';
+    if (!responseHasCacheDirective(cacheControl, 'public')) return false;
+    if (responseHasCacheDirective(cacheControl, 'private')) return false;
+    if (responseHasCacheDirective(cacheControl, 'no-store')) return false;
+    if (responseHasCacheDirective(cacheControl, 'no-cache')) return false;
+
+    const ttl = getResponseCacheTtl(response);
+    return ttl !== null && ttl > 0;
+}
+
+function responseFromHeadCache(cachedResponse) {
+    return new Response(null, {
+        status: cachedResponse.status,
+        statusText: cachedResponse.statusText,
+        headers: cachedResponse.headers,
+    });
+}
+
+async function maybeServeFromCache(request, ctx, producer) {
+    if (!isCacheLookupRequest(request)) {
+        return await producer();
+    }
+
+    const cache = caches.default;
+    const cacheKey = createCacheKeyRequest(request);
+    const cachedResponse = await cache.match(cacheKey);
+
+    if (cachedResponse) {
+        return request.method === 'HEAD'
+            ? responseFromHeadCache(cachedResponse)
+            : cachedResponse;
+    }
+
+    const response = await producer();
+
+    // 按业务代码返回的 Cache-Control 决定是否写入 Worker Cache
+    if (isCacheableResponse(request, response)) {
+        ctx.waitUntil(cache.put(cacheKey, response.clone()).catch(error => {
+            console.warn('Failed to store response in Worker cache:', error.message);
+        }));
+    }
+
+    return response;
+}
+
+
 // ==================== Worker 入口 ====================
 
 export default {
@@ -231,6 +347,6 @@ export default {
             data: {},
         };
 
-        return await executeChain(middlewares, handler, context);
+        return await maybeServeFromCache(request, ctx, () => executeChain(middlewares, handler, context));
     },
 };

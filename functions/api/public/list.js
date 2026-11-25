@@ -1,3 +1,7 @@
+/**
+ * 公开文件列表 API
+ * 负责按公开浏览配置返回可访问文件和目录列表，并维护列表缓存
+ */
 import { fetchOthersConfig } from "../../utils/sysConfig";
 import { readIndex } from '../../utils/indexManager.js';
 
@@ -102,10 +106,9 @@ async function getPublicFileList(context, url, dir, recursive) {
     await cache.put(cacheKey, new Response(JSON.stringify(cacheData), {
         headers: {
             "Content-Type": "application/json",
+            "Cache-Control": "public, max-age=86400",
         }
-    }), {
-        expirationTtl: 24 * 60 * 60
-    });
+    }));
 
     cacheData.fromCache = false;
     return cacheData;
